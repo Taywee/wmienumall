@@ -302,13 +302,20 @@ class EnumWbemClasses {
             IWbemClassObject* apObj[128];
             const HRESULT hres = enumClasses->Next(WBEM_INFINITE, 128, apObj, &returned);
             if (SUCCEEDED(hres)) {
-                std::vector<WbemClass> output;
-                for ( ULONG n = 0; n < returned; n++ ) {
-                    output.emplace_back(apObj[n]);
+                if (returned > 0) {
+                    std::vector<WbemClass> output;
+                    for ( ULONG n = 0; n < returned; n++ ) {
+                        output.emplace_back(apObj[n]);
+                    }
+                    return std::make_optional(std::move(output));
+                } else {
+                    return std::nullopt;
                 }
-                return std::make_optional(std::move(output));
             } else {
-                return std::nullopt;
+                std::ostringstream message;
+                message << "Could not Enum classes. Error code = 0x" 
+                    << std::hex << hres << std::endl;
+                throw std::runtime_error(message.str());
             }
         }
 };
@@ -323,7 +330,7 @@ int WINAPI wWinMain([[maybe_unused]] HINSTANCE hInstance, [[maybe_unused]] HINST
 
     auto enumClasses = EnumWbemClasses::classEnum(services);
 
-    for (auto items = enumClasses.next(); items; enumClasses.next()) {
+    for (auto items = enumClasses.next(); items; items = enumClasses.next()) {
         for (auto &item: items.value()) {
             auto className = item.get(L"__CLASS");
             std::wcout << className.value().variant.bstrVal << std::endl;
@@ -373,7 +380,7 @@ int WINAPI wWinMain([[maybe_unused]] HINSTANCE hInstance, [[maybe_unused]] HINST
 
         // Get the value of the Name property
         hr = pclsObj->Get(L"Name", 0, &vtProp, 0, 0);
-        wcout << " OS Name : " << vtProp.bstrVal << std::endl;
+        std::wcout << " OS Name : " << vtProp.bstrVal << std::endl;
         VariantClear(&vtProp);
 
         pclsObj->Release();
