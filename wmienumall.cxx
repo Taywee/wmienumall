@@ -232,10 +232,6 @@ class Variant {
             VariantClear(&variant);
         }
 
-        operator VARIANT&() {
-            return variant;
-        }
-
         operator VARIANT*() {
             return &variant;
         }
