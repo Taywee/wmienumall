@@ -13,10 +13,18 @@
 #include <optional>
 #include <stdexcept>
 #include <string>
+#include <tuple>
 
 class BString {
     public:
         BSTR string;
+
+        BString() : string(nullptr) {
+        }
+
+        BString(BSTR string) : string(string) {
+        }
+
         BString(const OLECHAR *psz) : string(SysAllocString(psz)) {
             if (string == nullptr) {
                 throw std::runtime_error("Could not allocate BStr");
@@ -35,6 +43,10 @@ class BString {
         BString &operator=(BString &&other) {
             std::swap(string, other.string);
             return *this;
+        }
+
+        operator BSTR*() {
+            return &string;
         }
 
         ~BString() {
@@ -130,8 +142,13 @@ class Locator {
 
 class Services {
     public: 
+        const ComLibrary library;
+        Locator locator;
+
         IWbemServices *pSvc;
-        Services(const Locator &locator, const std::wstring &wmiNamespace = L"ROOT\\CIMV2") {
+        Services(const std::wstring &wmiNamespace = L"ROOT\\CIMV2") {
+            comSecurity();
+
             const BString string(wmiNamespace.c_str()); // Object path of WMI namespace
             const HRESULT hres = locator.pLoc->ConnectServer(
                     string.string, 
@@ -195,6 +212,10 @@ class Variant {
     public:
         VARIANT variant;
 
+        Variant() {
+            VariantInit(&variant);
+        }
+
         Variant(VARIANT &&variant) : variant(std::move(variant)) {
         }
 
@@ -215,6 +236,10 @@ class Variant {
 
         operator VARIANT&() {
             return variant;
+        }
+
+        operator VARIANT*() {
+            return &variant;
         }
 };
 
@@ -242,6 +267,17 @@ class WbemClass {
             }
         }
 
+        void beginEnumeration() {
+            const HRESULT hres = obj->BeginEnumeration(WBEM_FLAG_NONSYSTEM_ONLY);
+            if (FAILED(hres))
+            {
+                std::ostringstream message;
+                message << "Failed to begin the enumeration. Error code = 0x" 
+                    << std::hex << hres << std::endl;
+                throw std::runtime_error(message.str());
+            }
+        }
+
         std::optional<Variant> get(const std::wstring &property) {
             VARIANT vtProp;
             const HRESULT hres = obj->Get(property.c_str(), 0, &vtProp, nullptr, 0);
@@ -250,6 +286,29 @@ class WbemClass {
             } else {
                 return std::nullopt;
             }
+        }
+
+        std::optional<std::tuple<BString, Variant>> next() {
+            BString name;
+            Variant value;
+            const HRESULT hres = obj->Next(
+                0,
+                name,
+                value,
+                nullptr,
+                nullptr
+                );
+            if (hres == WBEM_S_NO_MORE_DATA) {
+                return std::nullopt;
+            }
+            if (FAILED(hres))
+            {
+                std::ostringstream message;
+                message << "Failed to get next value. Error code = 0x" 
+                    << std::hex << hres << std::endl;
+                throw std::runtime_error(message.str());
+            }
+            return std::make_optional<std::tuple<BString, Variant>>(std::move(name), std::move(value));
         }
 };
 
@@ -265,11 +324,24 @@ class EnumWbemClasses {
 
         static EnumWbemClasses classEnum(Services &services) {
             EnumWbemClasses output;
-            const HRESULT hres = services.pSvc->CreateClassEnum(nullptr, WBEM_FLAG_FORWARD_ONLY | WBEM_FLAG_DEEP | WBEM_FLAG_RETURN_IMMEDIATELY, nullptr, output);
+            const HRESULT hres = services.pSvc->CreateClassEnum(nullptr, WBEM_FLAG_FORWARD_ONLY | WBEM_FLAG_RETURN_IMMEDIATELY, nullptr, output);
             if (FAILED(hres))
             {
                 std::ostringstream message;
                 message << "Could not Create class enum. Error code = 0x" 
+                    << std::hex << hres << std::endl;
+                throw std::runtime_error(message.str());
+            }
+            return output;
+        }
+
+        static EnumWbemClasses instanceEnum(Services &services, const BSTR className) {
+            EnumWbemClasses output;
+            const HRESULT hres = services.pSvc->CreateInstanceEnum(className, WBEM_FLAG_FORWARD_ONLY | WBEM_FLAG_RETURN_IMMEDIATELY, nullptr, output);
+            if (FAILED(hres))
+            {
+                std::ostringstream message;
+                message << "Could not Create instance enum. Error code = 0x" 
                     << std::hex << hres << std::endl;
                 throw std::runtime_error(message.str());
             }
@@ -321,10 +393,7 @@ class EnumWbemClasses {
 };
 
 int WINAPI wWinMain([[maybe_unused]] HINSTANCE hInstance, [[maybe_unused]] HINSTANCE hPrevInstance, [[maybe_unused]] PWSTR pCmdLine, [[maybe_unused]] int nCmdShow) {
-    const ComLibrary library;
-    comSecurity();
-    Locator locator;
-    Services services(locator);
+    Services services;
     services.setProxyBlanket();
     std::cout << "Connected to ROOT\\CIMV2 WMI namespace" << std::endl;
 
@@ -332,8 +401,20 @@ int WINAPI wWinMain([[maybe_unused]] HINSTANCE hInstance, [[maybe_unused]] HINST
 
     for (auto items = enumClasses.next(); items; items = enumClasses.next()) {
         for (auto &item: items.value()) {
-            auto className = item.get(L"__CLASS");
-            std::wcout << className.value().variant.bstrVal << std::endl;
+            auto className = _bstr_t(item.get(L"__CLASS").value().variant.bstrVal);
+            // TODO: remove this
+            if (std::wstring(className.GetBSTR(), className.length()).find(L"Win32") == 0 && std::wstring(className.GetBSTR(), className.length()).find(L"Processor") != std::wstring::npos) {
+                auto enumInstances = EnumWbemClasses::instanceEnum(services, className.GetBSTR());
+                for (auto instances = enumInstances.next(); instances; instances = enumInstances.next()) {
+                    for (auto &instance: instances.value()) {
+                        auto instanceName = instance.get(L"__CLASS");
+                        instance.beginEnumeration();
+                        for (auto pair = instance.next(); pair; pair = instance.next()) {
+                            std::wcout << instanceName.value().variant.bstrVal << " -> " << std::get<0>(pair.value()).string << std::endl;
+                        }
+                    }
+                }
+            }
         }
     }
 
