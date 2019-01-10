@@ -5,6 +5,8 @@
 #define _WIN32_DCOM
 #include <comdef.h>
 #include <wbemidl.h>
+#include <regex>
+#include <cstring>
 #include <iostream>
 #include <sstream>
 #include <vector>
@@ -13,8 +15,21 @@
 #include <string>
 #include <tuple>
 
-class BString {
-    public:
+#include "wmienumall.h"
+
+static void checkResult(const HRESULT hres, const std::string &message) {
+    if (FAILED(hres)) {
+        std::ostringstream oss;
+        oss
+            << message
+            << " Error code = 0x"
+            << std::hex << hres
+            << std::endl;
+        throw std::runtime_error(oss.str());
+    }
+}
+
+struct BString {
         BSTR string;
 
         BString() : string(nullptr) {
@@ -54,17 +69,10 @@ class BString {
         }
 };
 
-class ComLibrary {
-    public:
+struct ComLibrary {
         ComLibrary() {
-            const HRESULT hres =  CoInitializeEx(0, COINIT_MULTITHREADED); 
-            if (FAILED(hres))
-            {
-                std::ostringstream message;
-                message << "Failed to initialize COM library. Error code = 0x" 
-                    << std::hex << hres << std::endl;
-                throw std::runtime_error(message.str());
-            }
+            checkResult(CoInitializeEx(0, COINIT_MULTITHREADED),
+                    "Failed to initialize COM library.");
         }
         ~ComLibrary() {
             CoUninitialize();
@@ -80,7 +88,7 @@ class ComLibrary {
 };
 
 static void comSecurity() {
-    const HRESULT hres = CoInitializeSecurity(
+    checkResult(CoInitializeSecurity(
             NULL, 
             -1,                          // COM authentication
             NULL,                        // Authentication services
@@ -90,34 +98,18 @@ static void comSecurity() {
             NULL,                        // Authentication info
             EOAC_NONE,                   // Additional capabilities 
             NULL                         // Reserved
-            );
-
-    if (FAILED(hres))
-    {
-        std::ostringstream message;
-        message << "Failed to initialize COM security. Error code = 0x" 
-            << std::hex << hres << std::endl;
-        throw std::runtime_error(message.str());
-    }
+            ), "Failed to initialize COM security.");
 }
 
-class Locator {
-    public:
+struct Locator {
         IWbemLocator *pLoc;
         Locator() {
-            const HRESULT hres = CoCreateInstance(
-                    CLSID_WbemLocator,             
-                    0, 
-                    CLSCTX_INPROC_SERVER, 
-                    IID_IWbemLocator, (LPVOID *) &pLoc);
-            if (FAILED(hres))
-            {
-                std::ostringstream message;
-                message << "Failed to create IWbemLocator object."
-                    << " Err code = 0x"
-                    << std::hex << hres << std::endl;
-                throw std::runtime_error(message.str());
-            }
+            checkResult(CoCreateInstance(
+                        CLSID_WbemLocator,             
+                        0, 
+                        CLSCTX_INPROC_SERVER, 
+                        IID_IWbemLocator, (LPVOID *) &pLoc),
+                    "Failed to create IWbemLocator object.");
         }
 
         Locator(const Locator &) = delete;
@@ -138,8 +130,7 @@ class Locator {
         }
 };
 
-class Services {
-    public: 
+struct Services {
         const ComLibrary library;
         Locator locator;
 
@@ -148,23 +139,17 @@ class Services {
             comSecurity();
 
             const BString string(wmiNamespace.c_str()); // Object path of WMI namespace
-            const HRESULT hres = locator.pLoc->ConnectServer(
-                    string.string, 
-                    nullptr,                    // User name. NULL = current user
-                    nullptr,                    // User password. NULL = current
-                    0,                       // Locale. NULL indicates current
-                    0,                    // Security flags.
-                    0,                       // Authority (for example, Kerberos)
-                    0,                       // Context object 
-                    &pSvc                    // pointer to IWbemServices proxy
-                    );
-            if (FAILED(hres))
-            {
-                std::ostringstream message;
-                message << "Could not connect. Error code = 0x" 
-                    << std::hex << hres << std::endl;
-                throw std::runtime_error(message.str());
-            }
+            checkResult(locator.pLoc->ConnectServer(
+                        string.string, 
+                        nullptr,                    // User name. NULL = current user
+                        nullptr,                    // User password. NULL = current
+                        0,                       // Locale. NULL indicates current
+                        0,                    // Security flags.
+                        0,                       // Authority (for example, Kerberos)
+                        0,                       // Context object 
+                        &pSvc                    // pointer to IWbemServices proxy
+                        ),
+                    "Could not connect. Error code = 0x");
         }
 
         Services(const Services &) = delete;
@@ -185,7 +170,7 @@ class Services {
         }
 
         void setProxyBlanket() {
-            const HRESULT hres = CoSetProxyBlanket(
+            checkResult(CoSetProxyBlanket(
                     pSvc,                        // Indicates the proxy to set
                     RPC_C_AUTHN_WINNT,           // RPC_C_AUTHN_xxx
                     RPC_C_AUTHZ_NONE,            // RPC_C_AUTHZ_xxx
@@ -194,21 +179,14 @@ class Services {
                     RPC_C_IMP_LEVEL_IMPERSONATE, // RPC_C_IMP_LEVEL_xxx
                     NULL,                        // client identity
                     EOAC_NONE                    // proxy capabilities 
-                    );
-
-            if (FAILED(hres))
-            {
-                std::ostringstream message;
-                message << "Could not set proxy blanket. Error code = 0x" 
-                    << std::hex << hres << std::endl;
-                throw std::runtime_error(message.str());
-            }
+                    ),
+                "Could not set proxy blanket.");
         }
 };
 
-class Variant {
-    public:
+struct Variant {
         VARIANT variant;
+        std::wstring buffer;
 
         Variant() {
             VariantInit(&variant);
@@ -235,10 +213,76 @@ class Variant {
         operator VARIANT*() {
             return &variant;
         }
+
+        /** Get all the strings contained in this variant.
+         * If this is not an array type, there will only be one string.
+         */
+        std::vector<std::wstring> getStrings() {
+            return getStrings(variant);
+        }
+
+        static std::vector<std::wstring> getStrings(VARIANT &variant) {
+            std::vector<std::wstring> output;
+            const VARTYPE type = variant.vt;
+            if (type & VT_ARRAY) {
+                SAFEARRAY *array;
+                if (type & VT_BYREF) {
+                    array = *variant.pparray;
+                } else {
+                    array = variant.parray;
+                }
+                if (type & VT_BSTR) {
+                    BSTR *vals;
+                    checkResult(SafeArrayAccessData(array, reinterpret_cast<void **>(&vals)),
+                            "Failed to access array.");
+                    long lowerBound, upperBound;
+                    checkResult(SafeArrayGetLBound(array, 1, &lowerBound),
+                            "Failed to access array lower bound.");
+                    checkResult(SafeArrayGetUBound(array, 1, &upperBound),
+                            "Failed to access array upperwer bound.");
+                    const long elementCount = upperBound - lowerBound + 1;
+                    for (long i = 0; i < elementCount; ++i) {
+                        output.emplace_back(vals[i], SysStringLen(vals[i]));
+                    }
+                    SafeArrayUnaccessData(array);
+                }
+            } else {
+                if (!(type == VT_EMPTY || type == VT_NULL)) {
+                    Variant newVariant;
+                    checkResult(VariantChangeType(newVariant, &variant, VARIANT_ALPHABOOL, VT_BSTR),
+                            "Failed to convert variant to BSTR.");
+                    BSTR val = newVariant.variant.bstrVal;
+                    output.emplace_back(val, SysStringLen(val));
+                }
+            }
+            return output;
+        }
+
+        /** Get the strings from this variant joined by a comma and space
+         * between each, and sets the content string to be equal to this.
+         *
+         * This is not identical to old behavior, but that behavior was bad, and
+         * would often cause undesirable things (like an array of integers being
+         * interpreted as a single larger integer of multiple digits).
+         */
+        std::wstring &getString() {
+            static const std::wstring separator = L", ";
+            std::wostringstream oss;
+            const auto strings = getStrings();
+            auto it = std::begin(strings);
+            auto end = std::end(strings);
+            if (it != end) {
+                oss << *it;
+                for (++it; it != end; ++it) {
+                    oss << separator << *it;
+                }
+            }
+            buffer = oss.str();
+            return buffer;
+        }
 };
 
-class WbemClass {
-    public:
+struct WbemClass {
         IWbemClassObject* obj;
 
         WbemClass(IWbemClassObject* obj) : obj(obj) {
@@ -262,14 +306,8 @@ class WbemClass {
         }
 
         void beginEnumeration() {
-            const HRESULT hres = obj->BeginEnumeration(WBEM_FLAG_NONSYSTEM_ONLY);
-            if (FAILED(hres))
-            {
-                std::ostringstream message;
-                message << "Failed to begin the enumeration. Error code = 0x" 
-                    << std::hex << hres << std::endl;
-                throw std::runtime_error(message.str());
-            }
+            checkResult(obj->BeginEnumeration(WBEM_FLAG_NONSYSTEM_ONLY),
+                    "Failed to begin the enumeration.");
         }
 
         std::optional<Variant> get(const std::wstring &property) {
@@ -282,7 +320,7 @@ class WbemClass {
             }
         }
 
-        std::optional<std::tuple<BString, Variant>> next() {
+        std::optional<std::tuple<std::wstring, Variant>> next() {
             BString name;
             Variant value;
             const HRESULT hres = obj->Next(
@@ -295,19 +333,12 @@ class WbemClass {
             if (hres == WBEM_S_NO_MORE_DATA) {
                 return std::nullopt;
             }
-            if (FAILED(hres))
-            {
-                std::ostringstream message;
-                message << "Failed to get next value. Error code = 0x" 
-                    << std::hex << hres << std::endl;
-                throw std::runtime_error(message.str());
-            }
-            return std::make_optional<std::tuple<BString, Variant>>(std::move(name), std::move(value));
+            checkResult(hres, "Failed to get next value.");
+            return std::make_optional<std::tuple<std::wstring, Variant>>(std::wstring(name.string, SysStringLen(name.string)), std::move(value));
         }
 };
 
-class EnumWbemClasses {
-    public:
+struct EnumWbemClasses {
         IEnumWbemClassObject *enumClasses;
 
         EnumWbemClasses() : enumClasses(nullptr) {
@@ -318,27 +349,15 @@ class EnumWbemClasses {
 
         static EnumWbemClasses classEnum(Services &services) {
             EnumWbemClasses output;
-            const HRESULT hres = services.pSvc->CreateClassEnum(nullptr, WBEM_FLAG_FORWARD_ONLY | WBEM_FLAG_RETURN_IMMEDIATELY, nullptr, output);
-            if (FAILED(hres))
-            {
-                std::ostringstream message;
-                message << "Could not Create class enum. Error code = 0x" 
-                    << std::hex << hres << std::endl;
-                throw std::runtime_error(message.str());
-            }
+            checkResult(services.pSvc->CreateClassEnum(nullptr, WBEM_FLAG_FORWARD_ONLY | WBEM_FLAG_RETURN_IMMEDIATELY, nullptr, output),
+                    "Could not Create class enum.");
             return output;
         }
 
         static EnumWbemClasses instanceEnum(Services &services, const BSTR className) {
             EnumWbemClasses output;
-            const HRESULT hres = services.pSvc->CreateInstanceEnum(className, WBEM_FLAG_FORWARD_ONLY | WBEM_FLAG_RETURN_IMMEDIATELY, nullptr, output);
-            if (FAILED(hres))
-            {
-                std::ostringstream message;
-                message << "Could not Create instance enum. Error code = 0x" 
-                    << std::hex << hres << std::endl;
-                throw std::runtime_error(message.str());
-            }
+            checkResult(services.pSvc->CreateInstanceEnum(className, WBEM_FLAG_FORWARD_ONLY | WBEM_FLAG_RETURN_IMMEDIATELY, nullptr, output),
+                "Could not Create instance enum.");
             return output;
         }
 
@@ -366,52 +385,117 @@ class EnumWbemClasses {
         std::optional<std::vector<WbemClass>> next() {
             ULONG returned;
             IWbemClassObject* apObj[128];
-            const HRESULT hres = enumClasses->Next(WBEM_INFINITE, 128, apObj, &returned);
-            if (SUCCEEDED(hres)) {
-                if (returned > 0) {
-                    std::vector<WbemClass> output;
-                    for ( ULONG n = 0; n < returned; n++ ) {
-                        output.emplace_back(apObj[n]);
-                    }
-                    return std::make_optional(std::move(output));
-                } else {
-                    return std::nullopt;
+            checkResult(enumClasses->Next(WBEM_INFINITE, 128, apObj, &returned),
+                    "Could not Enum classes.");
+            if (returned > 0) {
+                std::vector<WbemClass> output;
+                for ( ULONG n = 0; n < returned; n++ ) {
+                    output.emplace_back(apObj[n]);
                 }
+                return std::make_optional(std::move(output));
             } else {
-                std::ostringstream message;
-                message << "Could not Enum classes. Error code = 0x" 
-                    << std::hex << hres << std::endl;
-                throw std::runtime_error(message.str());
+                return std::nullopt;
             }
         }
 };
 
-int WINAPI wWinMain([[maybe_unused]] HINSTANCE hInstance, [[maybe_unused]] HINSTANCE hPrevInstance, [[maybe_unused]] PWSTR pCmdLine, [[maybe_unused]] int nCmdShow) {
-    Services services;
-    services.setProxyBlanket();
-    std::cout << "Connected to ROOT\\CIMV2 WMI namespace" << std::endl;
+struct WmiInstance {
+    std::wstring className;
+    std::vector<std::tuple<std::wstring, std::wstring>> properties;
+};
 
-    auto enumClasses = EnumWbemClasses::classEnum(services);
+struct WmiEnum {
+    std::optional<std::string> error;
+    std::vector<WmiInstance> instances;
+};
 
-    for (auto items = enumClasses.next(); items; items = enumClasses.next()) {
-        for (auto &item: items.value()) {
-            auto className = _bstr_t(item.get(L"__CLASS").value().variant.bstrVal);
-            // TODO: remove this
-            if (std::wstring(className.GetBSTR(), className.length()).find(L"Win32") == 0 && std::wstring(className.GetBSTR(), className.length()).find(L"Processor") != std::wstring::npos) {
-                auto enumInstances = EnumWbemClasses::instanceEnum(services, className.GetBSTR());
-                for (auto instances = enumInstances.next(); instances; instances = enumInstances.next()) {
-                    for (auto &instance: instances.value()) {
-                        auto instanceName = instance.get(L"__CLASS");
-                        instance.beginEnumeration();
-                        for (auto pair = instance.next(); pair; pair = instance.next()) {
-                            std::wcout << instanceName.value().variant.bstrVal << " -> " << std::get<0>(pair.value()).string << std::endl;
+/// Always returns a WmiEnum, even in the case of error.
+WmiEnum *WmiEnum_new(const wchar_t * const classRegex, const wchar_t * const propertyRegex) {
+    WmiEnum *output = new WmiEnum();
+    try {
+        const std::wregex cRegex(classRegex), pRegex(propertyRegex);
+        Services services;
+        services.setProxyBlanket();
+        auto enumClasses = EnumWbemClasses::classEnum(services);
+        for (auto items = enumClasses.next(); items; items = enumClasses.next()) {
+            for (auto &item: items.value()) {
+                // Need this as a separate piece to avoid cleaning it up too early
+                auto rawClassName = item.get(L"__CLASS").value();
+                _bstr_t className(rawClassName.variant.bstrVal, false);
+                const std::wstring classNameS(className.GetBSTR(), className.length());
+                if (std::regex_match(classNameS, cRegex)) {
+                    auto enumInstances = EnumWbemClasses::instanceEnum(services, className.GetBSTR());
+                    for (auto instances = enumInstances.next(); instances; instances = enumInstances.next()) {
+                        for (auto &instance: instances.value()) {
+                            WmiInstance wmiInstance;
+                            wmiInstance.className.assign(classNameS);
+                            instance.beginEnumeration();
+                            for (auto pair = instance.next(); pair; pair = instance.next()) {
+                                if (std::regex_match(std::get<0>(pair.value()), pRegex)) {
+                                    wmiInstance.properties.emplace_back(
+                                            std::get<0>(pair.value()),
+                                            std::get<1>(pair.value()).getString());
+                                }
+                            }
+                            output->instances.emplace_back(std::move(wmiInstance));
                         }
                     }
                 }
+                className.Detach();
             }
         }
     }
+    catch (const std::exception &e) {
+        output->error = std::make_optional<std::string>(e.what());
+        output->instances.clear();
+    }
+    return output;
+}
 
-    return 0;   // Program successfully completed.
- 
+const char *WmiEnum_error(const WmiEnum * const wmiEnum) {
+    if (wmiEnum->error) {
+        return wmiEnum->error.value().c_str();
+    } else {
+        return nullptr;
+    }
+}
+
+void WmiEnum_free(WmiEnum * const wmiEnum) {
+    delete wmiEnum;
+}
+
+size_t WmiEnum_instanceCount(const WmiEnum * const wmiEnum) {
+    return wmiEnum->instances.size();
+}
+
+const wchar_t *WmiEnum_instanceClassName(const WmiEnum * const wmiEnum, const size_t instance) {
+    if (instance < wmiEnum->instances.size()) {
+        return wmiEnum->instances[instance].className.c_str();
+    }
+    return nullptr;
+}
+
+size_t WmiEnum_instancePropertyCount(const WmiEnum * const wmiEnum, const size_t instance) {
+    if (instance < wmiEnum->instances.size()) {
+        return wmiEnum->instances[instance].properties.size();
+    }
+    return 0;
+}
+const wchar_t *WmiEnum_instancePropertyKey(const WmiEnum * const wmiEnum, const size_t instance, const size_t property) {
+    if (instance < wmiEnum->instances.size()) {
+        const auto &i = wmiEnum->instances[instance];
+        if (property < i.properties.size()) {
+            return std::get<0>(i.properties[property]).c_str();
+        }
+    }
+    return nullptr;
+}
+const wchar_t *WmiEnum_instancePropertyValue(const WmiEnum * const wmiEnum, const size_t instance, const size_t property) {
+    if (instance < wmiEnum->instances.size()) {
+        const auto &i = wmiEnum->instances[instance];
+        if (property < i.properties.size()) {
+            return std::get<1>(i.properties[property]).c_str();
+        }
+    }
+    return nullptr;
 }
