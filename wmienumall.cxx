@@ -1,7 +1,5 @@
 /* Copyright © 2019 Taylor C. Richberger <taywee@gmx.com>
- * This code taken from
- * https://docs.microsoft.com/en-us/windows/desktop/WmiSdk/example--getting-wmi-data-from-the-local-computer
- * and therefore not covered by LICENSE file contents
+ * This code is released under the license described in the LICENSE file
  */
 
 #define _WIN32_DCOM
@@ -417,63 +415,6 @@ int WINAPI wWinMain([[maybe_unused]] HINSTANCE hInstance, [[maybe_unused]] HINST
             }
         }
     }
-
-    /*// Step 6: --------------------------------------------------
-    // Use the IWbemServices pointer to make requests of WMI ----
-
-    // For example, get the name of the operating system
-    IEnumWbemClassObject* pEnumerator = NULL;
-    hres = pSvc->ExecQuery(
-        SysAllocString(L"WQL"), 
-        SysAllocString(L"SELECT * FROM Win32_OperatingSystem"),
-        WBEM_FLAG_FORWARD_ONLY | WBEM_FLAG_RETURN_IMMEDIATELY, 
-        NULL,
-        &pEnumerator);
-    
-    if (FAILED(hres))
-    {
-        cout << "Query for operating system name failed."
-            << " Error code = 0x" 
-            << std::hex << hres << std::endl;
-        pSvc->Release();
-        pLoc->Release();
-        CoUninitialize();
-        return 1;               // Program has failed.
-    }
-
-    // Step 7: -------------------------------------------------
-    // Get the data from the query in step 6 -------------------
- 
-    IWbemClassObject *pclsObj = NULL;
-    ULONG uReturn = 0;
-   
-    while (pEnumerator)
-    {
-        HRESULT hr = pEnumerator->Next(WBEM_INFINITE, 1, 
-            &pclsObj, &uReturn);
-
-        if(0 == uReturn)
-        {
-            break;
-        }
-
-        VARIANT vtProp;
-
-        // Get the value of the Name property
-        hr = pclsObj->Get(L"Name", 0, &vtProp, 0, 0);
-        std::wcout << " OS Name : " << vtProp.bstrVal << std::endl;
-        VariantClear(&vtProp);
-
-        pclsObj->Release();
-    }
-
-    // Cleanup
-    // ========
-    
-    pSvc->Release();
-    pLoc->Release();
-    pEnumerator->Release();
-    CoUninitialize();*/
 
     return 0;   // Program successfully completed.
  
