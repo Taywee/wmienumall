@@ -17,6 +17,8 @@
 
 #include "wmienumall.h"
 
+/** Simple wrapper that checks an hres and throws an exception on failure.
+ */
 static void checkResult(const HRESULT hres, const std::string &message) {
     if (FAILED(hres)) {
         std::ostringstream oss;
@@ -29,46 +31,8 @@ static void checkResult(const HRESULT hres, const std::string &message) {
     }
 }
 
-struct BString {
-        BSTR string;
-
-        BString() : string(nullptr) {
-        }
-
-        BString(BSTR string) : string(string) {
-        }
-
-        BString(const OLECHAR *psz) : string(SysAllocString(psz)) {
-            if (string == nullptr) {
-                throw std::runtime_error("Could not allocate BStr");
-            }
-        }
-
-        BString(const std::wstring &psz) : BString(psz.c_str()) {
-        }
-
-        BString(const BString &) = delete;
-        BString(BString &&other) {
-            string = other.string;
-            other.string = nullptr;
-        }
-        BString &operator=(const BString &) = delete;
-        BString &operator=(BString &&other) {
-            std::swap(string, other.string);
-            return *this;
-        }
-
-        operator BSTR*() {
-            return &string;
-        }
-
-        ~BString() {
-            if (string) {
-                SysFreeString(string);
-            }
-        }
-};
-
+/** Simple RAII wrapper around CoInitializeEx and CoUninitialize().
+ */
 struct ComLibrary {
         ComLibrary() {
             checkResult(CoInitializeEx(0, COINIT_MULTITHREADED),
@@ -87,6 +51,8 @@ struct ComLibrary {
         }
 };
 
+/** Simple call to CoInitializeSecurity with default settings.
+ */
 static void comSecurity() {
     checkResult(CoInitializeSecurity(
             NULL, 
@@ -101,6 +67,8 @@ static void comSecurity() {
             ), "Failed to initialize COM security.");
 }
 
+/** Simple wrapper for creation and release of IWebmLocator.
+ */
 struct Locator {
         IWbemLocator *pLoc;
         Locator() {
@@ -130,6 +98,9 @@ struct Locator {
         }
 };
 
+/** Simple RAII wrapper around IWbemServices.
+ * Stores its own locator.
+ */
 struct Services {
         const ComLibrary library;
         Locator locator;
@@ -138,9 +109,9 @@ struct Services {
         Services(const std::wstring &wmiNamespace = L"ROOT\\CIMV2") {
             comSecurity();
 
-            const BString string(wmiNamespace.c_str()); // Object path of WMI namespace
+            _bstr_t string(wmiNamespace.c_str()); // Object path of WMI namespace
             checkResult(locator.pLoc->ConnectServer(
-                        string.string, 
+                        string.GetBSTR(), 
                         nullptr,                    // User name. NULL = current user
                         nullptr,                    // User password. NULL = current
                         0,                       // Locale. NULL indicates current
@@ -169,6 +140,8 @@ struct Services {
             }
         }
 
+        /** Calls CoSetProxyBlanket.
+         */
         void setProxyBlanket() {
             checkResult(CoSetProxyBlanket(
                     pSvc,                        // Indicates the proxy to set
@@ -184,21 +157,27 @@ struct Services {
         }
 };
 
+/** Simple VARIANT wrapper, which acts to add proper RAII semantics to the
+ * VARIANT type.
+ */
 struct Variant {
-        VARIANT variant;
+        VARIANT *variant;
         std::wstring buffer;
 
         Variant() {
-            VariantInit(&variant);
+            variant = new VARIANT();
+            VariantInit(variant);
         }
 
-        Variant(VARIANT &&variant) : variant(std::move(variant)) {
+        /** Assume variant to take ownership of.
+         */
+        Variant(VARIANT *variant) : variant(variant) {
         }
 
         Variant(const Variant &) = delete;
         Variant(Variant &&other) {
-            variant = std::move(other.variant);
-            VariantInit(&other.variant);
+            variant = other.variant;
+            other.variant = nullptr;
         }
         Variant &operator=(const Variant &) = delete;
         Variant &operator=(Variant &&other) {
@@ -207,10 +186,17 @@ struct Variant {
         }
 
         ~Variant() {
-            VariantClear(&variant);
+            if (variant) {
+                VariantClear(variant);
+                delete variant;
+            }
         }
 
         operator VARIANT*() {
+            return variant;
+        }
+
+        operator VARIANT**() {
             return &variant;
         }
 
@@ -221,15 +207,22 @@ struct Variant {
             return getStrings(variant);
         }
 
-        static std::vector<std::wstring> getStrings(VARIANT &variant) {
+        /** Get the strings contained in the target variant.
+         *
+         * Kept as a separate static function so that this can be recursively
+         * called on update if later necessary.
+         */
+        static std::vector<std::wstring> getStrings(VARIANT *variant) {
             std::vector<std::wstring> output;
-            const VARTYPE type = variant.vt;
+            const VARTYPE type = variant->vt;
+            // Check for array.  Later arrays can be handled better, but at the
+            // moment, the only SAFEARRAY type that is handled is a BSTR array
             if (type & VT_ARRAY) {
                 SAFEARRAY *array;
                 if (type & VT_BYREF) {
-                    array = *variant.pparray;
+                    array = *variant->pparray;
                 } else {
-                    array = variant.parray;
+                    array = variant->parray;
                 }
                 if (type & VT_BSTR) {
                     BSTR *vals;
@@ -249,9 +242,9 @@ struct Variant {
             } else {
                 if (!(type == VT_EMPTY || type == VT_NULL)) {
                     Variant newVariant;
-                    checkResult(VariantChangeType(newVariant, &variant, VARIANT_ALPHABOOL, VT_BSTR),
+                    checkResult(VariantChangeType(newVariant, variant, VARIANT_ALPHABOOL, VT_BSTR),
                             "Failed to convert variant to BSTR.");
-                    BSTR val = newVariant.variant.bstrVal;
+                    BSTR val = newVariant.variant->bstrVal;
                     output.emplace_back(val, SysStringLen(val));
                 }
             }
@@ -282,6 +275,9 @@ struct Variant {
         }
 };
 
+/** Class for dealing with property classes, which can have Variants retrieved
+ * from by name or enumerated over.
+ */
 struct WbemClass {
         IWbemClassObject* obj;
 
@@ -311,21 +307,23 @@ struct WbemClass {
         }
 
         std::optional<Variant> get(const std::wstring &property) {
-            VARIANT vtProp;
-            const HRESULT hres = obj->Get(property.c_str(), 0, &vtProp, nullptr, 0);
+            Variant variant;
+            const HRESULT hres = obj->Get(property.c_str(), 0, variant, nullptr, 0);
             if (SUCCEEDED(hres)) {
-                return std::make_optional<Variant>(std::move(vtProp));
+                return std::make_optional<Variant>(std::move(variant));
             } else {
                 return std::nullopt;
             }
         }
 
+        /** Used to iterate through all items in this iterator.
+         */
         std::optional<std::tuple<std::wstring, Variant>> next() {
-            BString name;
+            BSTR name = nullptr;
             Variant value;
             const HRESULT hres = obj->Next(
                 0,
-                name,
+                &name,
                 value,
                 nullptr,
                 nullptr
@@ -334,10 +332,14 @@ struct WbemClass {
                 return std::nullopt;
             }
             checkResult(hres, "Failed to get next value.");
-            return std::make_optional<std::tuple<std::wstring, Variant>>(std::wstring(name.string, SysStringLen(name.string)), std::move(value));
+            // Wrap the BSTR to ensure it is correctly freed
+            _bstr_t namestring(name, false);
+            return std::make_optional<std::tuple<std::wstring, Variant>>(std::wstring(namestring.GetBSTR(), namestring.length()), std::move(value));
         }
 };
 
+/** Wrapper class to handle enumerating wbem classes.
+ */
 struct EnumWbemClasses {
         IEnumWbemClassObject *enumClasses;
 
@@ -357,7 +359,7 @@ struct EnumWbemClasses {
         static EnumWbemClasses instanceEnum(Services &services, const BSTR className) {
             EnumWbemClasses output;
             checkResult(services.pSvc->CreateInstanceEnum(className, WBEM_FLAG_FORWARD_ONLY | WBEM_FLAG_RETURN_IMMEDIATELY, nullptr, output),
-                "Could not Create instance enum.");
+                "Could not create instance enum.");
             return output;
         }
 
@@ -382,6 +384,8 @@ struct EnumWbemClasses {
             }
         }
 
+        /** Enumerate classes in a maximum possible chunk size of 128.
+         */
         std::optional<std::vector<WbemClass>> next() {
             ULONG returned;
             IWbemClassObject* apObj[128];
@@ -399,36 +403,60 @@ struct EnumWbemClasses {
         }
 };
 
+/** Implementation of the public interface class for an instance.  This isn't
+ * actually exposed publicly.
+ */
 struct WmiInstance {
     std::wstring className;
     std::vector<std::tuple<std::wstring, std::wstring>> properties;
 };
 
+/** Implementation of the public interface class for the entire enum, which is
+ * just an optional error and a vector of instances.
+ */
 struct WmiEnum {
     std::optional<std::string> error;
     std::vector<WmiInstance> instances;
 };
 
-/// Always returns a WmiEnum, even in the case of error.
+/** Get a new WmiEnum.  In the case of error, this enum will possibly have some
+ * instances, but will definitely have its error field set.  Even in the case of
+ * error, the WmiEnum instance should be freed.
+ */
 WmiEnum *WmiEnum_new(const wchar_t * const classRegex, const wchar_t * const propertyRegex) {
     WmiEnum *output = new WmiEnum();
     try {
         const std::wregex cRegex(classRegex), pRegex(propertyRegex);
+        // at some point, it might make sense to have services independently
+        // allocatable and freeable so that it can be allocated just once in the
+        // program's lifespan.
         Services services;
         services.setProxyBlanket();
         auto enumClasses = EnumWbemClasses::classEnum(services);
         for (auto items = enumClasses.next(); items; items = enumClasses.next()) {
+            // We already know that items has a value due to the for loop check.
             for (auto &item: items.value()) {
-                // Need this as a separate piece to avoid cleaning it up too early
+                // Need this as a separate piece to avoid cleaning it up too
+                // early.  If we access the bstr directly here, the following
+                // statement will be holding a dangling pointer because the
+                // Variant will have been cleaned up.
                 auto rawClassName = item.get(L"__CLASS").value();
-                _bstr_t className(rawClassName.variant.bstrVal, false);
-                const std::wstring classNameS(className.GetBSTR(), className.length());
-                if (std::regex_match(classNameS, cRegex)) {
-                    auto enumInstances = EnumWbemClasses::instanceEnum(services, className.GetBSTR());
+
+                // Convenience BSTR
+                auto bClassName = rawClassName.variant->bstrVal;
+                const std::wstring className(bClassName, SysStringLen(bClassName));
+                if (std::regex_match(className, cRegex)) {
+
+                    // Iterate all instances
+                    auto enumInstances = EnumWbemClasses::instanceEnum(services, bClassName);
                     for (auto instances = enumInstances.next(); instances; instances = enumInstances.next()) {
+                        // We already know the instance exists
                         for (auto &instance: instances.value()) {
+
+                            // Iterate all properties and add them to the new
+                            // instance
                             WmiInstance wmiInstance;
-                            wmiInstance.className.assign(classNameS);
+                            wmiInstance.className.assign(className);
                             instance.beginEnumeration();
                             for (auto pair = instance.next(); pair; pair = instance.next()) {
                                 if (std::regex_match(std::get<0>(pair.value()), pRegex)) {
@@ -441,13 +469,11 @@ WmiEnum *WmiEnum_new(const wchar_t * const classRegex, const wchar_t * const pro
                         }
                     }
                 }
-                className.Detach();
             }
         }
     }
     catch (const std::exception &e) {
         output->error = std::make_optional<std::string>(e.what());
-        output->instances.clear();
     }
     return output;
 }
