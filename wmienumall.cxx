@@ -52,9 +52,13 @@ struct ComLibrary {
 };
 
 /** Simple call to CoInitializeSecurity with default settings.
+ *
+ * Only initializes the security once.
  */
 static void comSecurity() {
-    checkResult(CoInitializeSecurity(
+    static bool initialized = false;
+    if (!initialized) {
+        checkResult(CoInitializeSecurity(
             NULL, 
             -1,                          // COM authentication
             NULL,                        // Authentication services
@@ -65,6 +69,8 @@ static void comSecurity() {
             EOAC_NONE,                   // Additional capabilities 
             NULL                         // Reserved
             ), "Failed to initialize COM security.");
+        initialized = true;
+    }
 }
 
 /** Simple wrapper for creation and release of IWebmLocator.
